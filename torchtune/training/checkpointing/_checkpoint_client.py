@@ -31,6 +31,7 @@ class TrainingProgress:
 
     seed: int
     epochs_run: int
+    steps_run: int
     total_epochs: int
     max_steps_per_epoch: int
 
@@ -38,6 +39,7 @@ class TrainingProgress:
         return {
             training.SEED_KEY: self.seed,
             training.EPOCHS_KEY: self.epochs_run,
+            training.STEP_KEY: self.steps_run,
             training.TOTAL_EPOCHS_KEY: self.total_epochs,
             training.MAX_STEPS_KEY: self.max_steps_per_epoch,
         }
@@ -113,6 +115,7 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        step: int | None = None,
     ) -> None:
         """
         Checkpoint the training state asynchronously as a distributed checkpoint. Saving
@@ -143,6 +146,7 @@ class CheckpointClient:
         dcp_saver.save_checkpoint(
             ckpt_dict,
             epoch=epoch,
+            step=step,
             save_async=True,
         )
 
@@ -157,6 +161,7 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        step: int | None = None,
     ) -> None:
         """
         Checkpoint the training state synchronously.
@@ -241,6 +246,7 @@ class CheckpointClient:
             self._get_checkpointer().save_checkpoint(
                 checkpoint_dict,
                 epoch=epoch,
+                step=step,
                 intermediate_checkpoint=intermediate_checkpoint,
             )
 
@@ -265,6 +271,7 @@ class CheckpointClient:
         optimizer: Union[torch.optim.Optimizer, OptimizerInBackwardWrapper],
         training_progress: TrainingProgress,
         epoch: int,
+        step: int | None = None,
     ) -> None:
         """
         Checkpoint the training state.
@@ -280,9 +287,13 @@ class CheckpointClient:
         intermediate_checkpoint = epoch + 1 < training_progress.total_epochs
 
         if intermediate_checkpoint and self._enable_async_checkpointing:
-            self._save_checkpoint_async(model, optimizer, training_progress, epoch)
+            self._save_checkpoint_async(
+                model, optimizer, training_progress, epoch, step=step
+            )
         else:
-            self._save_checkpoint_sync(model, optimizer, training_progress, epoch)
+            self._save_checkpoint_sync(
+                model, optimizer, training_progress, epoch, step=step
+            )
 
     def load_base_checkpoint(self) -> Dict[str, Any]:
         """
@@ -316,6 +327,7 @@ class CheckpointClient:
                 training.OPT_KEY: optim_state_dict,
                 training.SEED_KEY: 0,
                 training.EPOCHS_KEY: 0,
+                training.STEP_KEY: 0,
                 training.TOTAL_EPOCHS_KEY: 0,
                 training.MAX_STEPS_KEY: 0,
             }

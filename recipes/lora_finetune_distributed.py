@@ -143,7 +143,8 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
-
+        self._save_every_n_steps = cfg.get("save_every_n_steps", None)
+        
         if self._log_peak_memory_stats and self._device.type != "cuda":
             log.info(
                 "log_peak_memory_stats was set to True, however, training does not use cuda. Setting log_peak_memory_stats=False."
@@ -222,7 +223,8 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         """
         try:
             self.epochs_run = ckpt_dict[training.EPOCHS_KEY]
-
+            self.global_step = ckpt_dict[training.STEPS_KEY]
+            
             # on mismatch, warn the user and prevent the override
             if self.seed != ckpt_dict[training.SEED_KEY]:
                 warn(
@@ -331,7 +333,6 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             and self.max_steps_per_epoch < self._steps_per_epoch
         ):
             self._steps_per_epoch = self.max_steps_per_epoch
-        self.global_step = self.epochs_run * self._steps_per_epoch
 
         # Learning rate scheduler can only be set up after number of steps
         # has been computed
@@ -629,6 +630,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
     def save_checkpoint(
         self,
         epoch: int,
+        epoch_end: bool,
     ) -> None:
         """
         Checkpoint the state of the recipe. The constructed checkpoint state dict
@@ -729,6 +731,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             self._checkpointer.save_checkpoint(
                 checkpoint_dict,
                 epoch=epoch,
+                step=self.global_step,
                 intermediate_checkpoint=intermediate_checkpoint,
                 adapter_only=self._save_adapter_weights_only,
             )
@@ -752,6 +755,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
         num_tokens = 0
 
         self._profiler.start()
+        
+        skip_initial_steps = (self.global_step % self._steps_per_epoch)
+        
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
 
@@ -760,7 +766,14 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
             self._sampler.set_epoch(curr_epoch)
 
             pbar = tqdm(total=self._steps_per_epoch, disable=not (self.rank == 0))
-            for idx, batch in enumerate(self._dataloader):
+            iterable = enumerate(self._dataloader)
+            if skip_initial_steps > 0:
+                for _ in range(skip_initial_steps * self._gradient_accumulation_steps):
+                    next(iterable)
+                pbar.update(skip_initial_steps)
+                skip_initial_steps = 0
+
+            for idx, batch in iterable:
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)
@@ -864,6 +877,9 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                             log_dict,
                             step=self.global_step,
                         )
+                    
+                    if self._save_every_n_steps is not None and self.global_step % self._save_every_n_steps == 0:
+                        self.save_checkpoint(epoch=curr_epoch, epoch_end=False)
 
                     # Reset running stats for the next step
                     running_loss = 0
@@ -889,7 +905,7 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
                     self._profiler.step()
 
             self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+            self.save_checkpoint(epoch=curr_epoch, epoch_end=True)
 
         self._profiler.stop()
 

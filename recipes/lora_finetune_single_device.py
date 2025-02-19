@@ -133,6 +133,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # logging attributes
         self._output_dir = cfg.output_dir
+        self._save_every_n_steps = cfg.get("save_every_n_steps", None)
+        print("!XXX SAVE EVERY N STEPS", self._save_every_n_steps)
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
 
@@ -210,6 +212,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         try:
             self.epochs_run = ckpt_dict[training.EPOCHS_KEY]
+            self.global_step = ckpt_dict[training.STEPS_KEY]
+            print(f"!XXX RESTORED GLOBAL STEP: {self.global_step}")
 
             # on mismatch, warn the user and prevent the override
             if self.seed != ckpt_dict[training.SEED_KEY]:
@@ -327,7 +331,6 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
             and self.max_steps_per_epoch < self._steps_per_epoch
         ):
             self._steps_per_epoch = self.max_steps_per_epoch
-            self.global_step = self.epochs_run * self._steps_per_epoch
 
         # Learning rate scheduler can only be set up after number of steps
         # has been computed
@@ -568,7 +571,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         return sampler, dataloader
 
-    def save_checkpoint(self, epoch: int) -> None:
+    def save_checkpoint(self, epoch: int, epoch_end: bool) -> None:
         """
         Checkpoint the state of the recipe. The constructed checkpoint state dict
         contains the following information:
@@ -579,9 +582,12 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         To correctly resume from training, the adapter weights and recipe state must be provided along with the base model weights.
         """
+        start_save_checkpoint = time.perf_counter()
+        log.info("Starting checkpoint save...")
+        
         ckpt_dict = {}
 
-        intermediate_checkpoint = epoch + 1 < self.total_epochs
+        intermediate_checkpoint = not epoch_end or epoch + 1 < self.total_epochs
         # if training is in-progress, checkpoint the optimizer state as well
         if intermediate_checkpoint:
             ckpt_dict.update(
@@ -589,6 +595,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     training.OPT_KEY: self._optimizer.state_dict(),
                     training.SEED_KEY: self.seed,
                     training.EPOCHS_KEY: self.epochs_run,
+                    training.STEPS_KEY: self.global_step,
                     training.TOTAL_EPOCHS_KEY: self.total_epochs,
                     training.MAX_STEPS_KEY: self.max_steps_per_epoch,
                 }
@@ -626,8 +633,15 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._checkpointer.save_checkpoint(
             ckpt_dict,
             epoch=epoch,
+            step=self.global_step,
             intermediate_checkpoint=intermediate_checkpoint,
             adapter_only=self._save_adapter_weights_only,
+        )
+        
+        log.info(
+            "Checkpoint saved in {:.2f} seconds.".format(
+                time.perf_counter() - start_save_checkpoint
+            )
         )
 
     def _loss_step(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -669,6 +683,8 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
+        skip_initial_steps = (self.global_step % self._steps_per_epoch)
+        
         with self._profiler as prof:
             # self.epochs_run should be non-zero when we're resuming from a checkpoint
             for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -677,7 +693,15 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                 self._sampler.set_epoch(curr_epoch)
 
                 pbar = tqdm(total=self._steps_per_epoch)
-                for idx, batch in enumerate(self._dataloader):
+                iterable = enumerate(self._dataloader)
+                if skip_initial_steps > 0:
+                    # Skip the initial steps from the iterable
+                    for _ in range(skip_initial_steps * self._gradient_accumulation_steps):
+                        next(iterable)
+                    pbar.update(skip_initial_steps)
+                    skip_initial_steps = 0
+
+                for idx, batch in iterable:
                     if (
                         self.max_steps_per_epoch is not None
                         and (idx // self._gradient_accumulation_steps)
@@ -751,6 +775,9 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 step=self.global_step,
                             )
 
+                        if self._save_every_n_steps is not None and self.global_step % self._save_every_n_steps == 0:
+                            self.save_checkpoint(epoch=curr_epoch, epoch_end=False)
+
                         # Reset running stats for the next step
                         running_loss = 0
                         num_tokens = 0
@@ -774,14 +801,7 @@ class LoRAFinetuneRecipeSingleDevice(FTRecipeInterface):
                     prof.step()
 
                 self.epochs_run += 1
-                start_save_checkpoint = time.perf_counter()
-                log.info("Starting checkpoint save...")
-                self.save_checkpoint(epoch=curr_epoch)
-                log.info(
-                    "Checkpoint saved in {:.2f} seconds.".format(
-                        time.perf_counter() - start_save_checkpoint
-                    )
-                )
+                self.save_checkpoint(epoch=curr_epoch, epoch_end=True)
 
     def cleanup(self) -> None:
         self._metric_logger.close()

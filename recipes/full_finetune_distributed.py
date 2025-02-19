@@ -231,6 +231,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         """
         try:
             self.epochs_run = ckpt_dict[training.EPOCHS_KEY]
+            self.global_step = ckpt_dict[training.STEPS_KEY]
 
             # on mismatch, warn the user and prevent the override
             if self.seed != ckpt_dict[training.SEED_KEY]:
@@ -369,7 +370,6 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
             and self.max_steps_per_epoch < self._steps_per_epoch
         ):
             self._steps_per_epoch = self.max_steps_per_epoch
-        self.global_step = self.epochs_run * self._steps_per_epoch
 
         # Setup lr scheduler
         self._lr_scheduler = self._setup_lr_scheduler(
@@ -752,14 +752,25 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         num_tokens = 0
 
         self._profiler.start()
+        
+        skip_initial_steps = (self.global_step % self._steps_per_epoch)
+        
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
             # Update the sampler to ensure data is correctly shuffled across epochs
             # in case shuffle is True
             self._sampler.set_epoch(curr_epoch)
 
+            iterable = enumerate(self._dataloader)
             pbar = tqdm(total=self._steps_per_epoch, disable=not self._is_rank_zero)
-            for idx, batch in enumerate(self._dataloader):
+
+            if skip_initial_steps > 0:
+                for _ in range(skip_initial_steps * self._gradient_accumulation_steps):
+                    next(iterable)
+                pbar.update(skip_initial_steps)
+                skip_initial_steps = 0
+
+            for idx, batch in iterable:
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)
@@ -919,6 +930,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
                 training_progress=TrainingProgress(
                     seed=self.seed,
                     epochs_run=self.epochs_run,
+                    steps_run=self.global_step,
                     total_epochs=self.total_epochs,
                     max_steps_per_epoch=self.max_steps_per_epoch,
                 ),

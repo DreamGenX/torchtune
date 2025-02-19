@@ -71,6 +71,8 @@ STEPS_KEY = "steps_run"
 # rng state for ensuring correct training resuming in PPO
 RNG_KEY = "rng_state"
 
+CHECKPOINT_PATTERN = r"^epoch_(\d+)(?:_step_(\d+))?"
+
 
 class ModelType(Enum):
     """ModelType is used by the checkpointer to distinguish between different model architectures.
@@ -307,7 +309,7 @@ def update_state_dict_for_classifier(
 
 # TODO: add test
 def get_largest_iter_folder(
-    dir: Union[str, Path], pattern: str = r"^epoch_(\d+)"
+    dir: Union[str, Path], pattern: str = CHECKPOINT_PATTERN
 ) -> Union[None, str]:
 
     latest_epoch_folder = None
@@ -319,7 +321,8 @@ def get_largest_iter_folder(
         match = regex.match(fname)
         if match:
             # Extract the number from the match
-            iter_number = int(match.group(1))
+            print(f"Found [{CHECKPOINT_PATTERN}] in [{fname}] match: {match} ... {match.groups()}")
+            iter_number = tuple(int(g) for g in match.groups() if g is not None)
             iter_folders.append((fname, iter_number))
 
     # Find the folder with the largest iter number
@@ -441,7 +444,7 @@ def get_adapter_checkpoint_path(
     output_dir: Path,
     adapter_checkpoint: Optional[str] = None,
     should_load_recipe_state: bool = False,
-    pattern: str = r"^epoch_(\d+)",
+    pattern: str = CHECKPOINT_PATTERN,
 ) -> Optional[Path]:
     r"""
     If adapter_checkpoint is None, look for it in {output_dir}/epoch_{latest_epoch}/adapter_model.pt.

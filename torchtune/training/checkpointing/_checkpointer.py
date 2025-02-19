@@ -29,6 +29,7 @@ from torchtune.models import convert_weights
 from torchtune.training.checkpointing._utils import (
     ADAPTER_CONFIG_FNAME,
     ADAPTER_MODEL_FNAME,
+    CHECKPOINT_PATTERN,
     check_outdir_not_in_ckptdir,
     copy_files,
     get_adapter_checkpoint_path,
@@ -131,7 +132,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         model_type (str): Model type of the model for which the checkpointer is being loaded, e.g. LLAMA3.
         output_dir (str): Directory to save the checkpoint files
         adapter_checkpoint (Optional[str]): Path to the adapter weights. If None,
-            and `should_load_recipe_state=True`, then look for adapter_model.pt in output_dir/epoch_{largest_epoch}.
+            and `should_load_recipe_state=True`, then look for adapter_model.pt in output_dir/epoch_{largest_epoch}(_step_{largest_step})?.
             Default is None.
         recipe_checkpoint (Optional[str]): Path to the recipe state checkpoint file. If None,
             and `should_load_recipe_state=True`, then look for recipe_state.pt in output_dir/RECIPE_STATE_DIRNAME.
@@ -187,7 +188,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
             output_dir=self._output_dir,
             adapter_checkpoint=adapter_checkpoint,
             should_load_recipe_state=self._should_load_recipe_state,
-            pattern=r"^epoch_(\d+)",
+            pattern=CHECKPOINT_PATTERN,
         )
 
         # resume recipe_state ckpt
@@ -258,6 +259,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         self,
         state_dict: Dict[str, Any],
         epoch: int,
+        step: int | None = None,
         intermediate_checkpoint: bool = False,
         adapter_only: bool = False,
     ) -> None:
@@ -292,13 +294,15 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
             ValueError: if ``adapter_only`` is True and adapter checkpoint not found in state_dict.
         """
 
+        checkpoint_name = get_checkpoint_name(epoch, step)
+
         # Output file is always a .bin file with the epoch number in the name
         if not adapter_only:
             shard_name = SHARD_FNAME.format(
                 cpt_idx="1".zfill(5), num_shards="1".zfill(5)
             )
             output_path = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", shard_name
+                self._output_dir, checkpoint_name, shard_name
             ).with_suffix(".bin")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(state_dict[training.MODEL_KEY], output_path)
@@ -310,7 +314,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
 
         if training.ADAPTER_KEY in state_dict:
             output_path = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", ADAPTER_MODEL_FNAME
+                self._output_dir, checkpoint_name, ADAPTER_MODEL_FNAME
             ).with_suffix(".pt")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(state_dict[training.ADAPTER_KEY], output_path)
@@ -457,7 +461,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             output_dir=self._output_dir,
             adapter_checkpoint=adapter_checkpoint,
             should_load_recipe_state=self._should_load_recipe_state,
-            pattern=r"^epoch_(\d+)",
+            pattern=CHECKPOINT_PATTERN,
         )
 
         # resume recipe_state ckpt
@@ -638,6 +642,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         self,
         state_dict: Dict[str, Any],
         epoch: int,
+        step: int | None = None,
         intermediate_checkpoint: bool = False,
         adapter_only: bool = False,
     ) -> None:
@@ -659,6 +664,8 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         Raises:
             ValueError: if ``adapter_only`` is True and adapter checkpoint not found in state_dict.
         """
+        checkpoint_name = get_checkpoint_name(epoch, step)
+
         # convert the state_dict back to hf format; do this inplace
         if not adapter_only:
             if self._model_type == ModelType.PHI3_MINI:
@@ -758,7 +765,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 )
                 map_original_name_to_new_name[cpt_idx] = shard_name
                 output_path = Path.joinpath(
-                    self._output_dir, f"epoch_{epoch}", shard_name
+                    self._output_dir, checkpoint_name, shard_name
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 if not self._safe_serialization:
@@ -790,7 +797,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 index_file_name = TORCH_INDEX_FNAME
 
             index_path = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", index_file_name
+                self._output_dir, checkpoint_name, index_file_name
             )
 
             index_data = {
@@ -807,7 +814,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
             # convert_weights.peft_to_tune. The .pt format is not needed, but
             # it is an easy way to distinguish the adapters. Ideally we should save only one.
             output_path = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", ADAPTER_MODEL_FNAME
+                self._output_dir, checkpoint_name, ADAPTER_MODEL_FNAME
             ).with_suffix(".pt")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(state_dict[training.ADAPTER_KEY], output_path)
@@ -836,7 +843,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     head_dim=self._config.get("head_dim", None),
                 )
                 output_path = Path.joinpath(
-                    self._output_dir, f"epoch_{epoch}", ADAPTER_MODEL_FNAME
+                    self._output_dir, checkpoint_name, ADAPTER_MODEL_FNAME
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 if not self._safe_serialization:
@@ -877,7 +884,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 )
 
                 output_path = Path.joinpath(
-                    self._output_dir, f"epoch_{epoch}", ADAPTER_CONFIG_FNAME
+                    self._output_dir, checkpoint_name, ADAPTER_CONFIG_FNAME
                 ).with_suffix(".json")
                 with open(output_path, "w") as f:
                     json.dump(state_dict[training.ADAPTER_CONFIG], f)
@@ -891,7 +898,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         # So its easy to run inference with the model using this epoch's checkpoint
         copy_files(
             self._checkpoint_dir,
-            Path.joinpath(self._output_dir, f"epoch_{epoch}"),
+            Path.joinpath(self._output_dir, checkpoint_name),
             ignore_suffixes=SUFFIXES_TO_NOT_COPY,
         )
 
@@ -995,7 +1002,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
             output_dir=self._output_dir,
             adapter_checkpoint=adapter_checkpoint,
             should_load_recipe_state=self._should_load_recipe_state,
-            pattern=r"^epoch_(\d+)",
+            pattern=CHECKPOINT_PATTERN,
         )
 
         # resume recipe_state ckpt
@@ -1066,6 +1073,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         self,
         state_dict: Dict[str, Any],
         epoch: int,
+        step: int | None = None,
         intermediate_checkpoint: bool = False,
         adapter_only: bool = False,
     ) -> None:
@@ -1084,6 +1092,8 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         Raises:
             ValueError: if ``adapter_only`` is True and adapter checkpoint not found in state_dict.
         """
+
+        checkpoint_name = get_checkpoint_name(epoch, step)
 
         if not adapter_only:
             model_state_dict = state_dict[training.MODEL_KEY]
@@ -1114,7 +1124,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
                 cpt_idx="1".zfill(5), num_shards="1".zfill(5)
             )
             checkpoint_file = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", model_filename
+                self._output_dir, checkpoint_name, model_filename
             ).with_suffix(".bin")
             checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1127,7 +1137,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
 
         if training.ADAPTER_KEY in state_dict:
             output_path = Path.joinpath(
-                self._output_dir, f"epoch_{epoch}", ADAPTER_MODEL_FNAME
+                self._output_dir, checkpoint_name, ADAPTER_MODEL_FNAME
             ).with_suffix(".pt")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(state_dict[training.ADAPTER_KEY], output_path)
@@ -1146,7 +1156,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         # So its easy to run inference with the model using this epoch's checkpoint
         copy_files(
             self._checkpoint_dir,
-            Path.joinpath(self._output_dir, f"epoch_{epoch}"),
+            Path.joinpath(self._output_dir, checkpoint_name),
             ignore_suffixes=SUFFIXES_TO_NOT_COPY,
         )
 
@@ -1272,6 +1282,7 @@ class DistributedCheckpointer(_CheckpointerInterface):
         self,
         state_dict: Dict[str, Any],
         epoch: int,
+        step: int | None = None,
         save_async: bool = False,
     ) -> None:
         """
@@ -1366,3 +1377,9 @@ class DistributedCheckpointer(_CheckpointerInterface):
             msg="The full model checkpoint, including all the weights and configurations, has been saved successfully "
             "by the DistributedCheckpointer. You can now use this checkpoint for further training.",
         )
+
+def get_checkpoint_name(epoch: int, step: int | None = None) -> str:
+    checkpoint_name = f"epoch_{epoch}"
+    if step is not None:
+        checkpoint_name += f"_step_{step}"
+    return checkpoint_name
